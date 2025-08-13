@@ -28,7 +28,7 @@
 
 require 'bundler/inline'
 
-gemfile(true) do
+gemfile(true, quiet: true) do  
   source "https://rubygems.org"
   gem "mcp"
   gem "net-http"
