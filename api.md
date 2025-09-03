@@ -696,7 +696,7 @@ GET /v1/teams/docs/posts HTTP/1.1
     - `comments` を指定するとコメントの配列を含んだレスポンスを返します。
     - `comments,comments.stargazers`を指定するとコメントとコメントに対するStarの配列を含んだレスポンスを返します。
     - `stargazers` を指定するとStarの配列を含んだレスポンスを返します。
- 
+
 ```
 GET /v1/teams/docs/posts/1 HTTP/1.1
 ```
@@ -1632,7 +1632,7 @@ Content-Type: application/json
 
 * code (String)
     * 招待時の識別子を指定します
-   
+
 ```
 DELETE /v1/teams/:team_name/invitations/mee93383edf699b525e01842d34078e28 HTTP/1.1
 ```
@@ -1898,6 +1898,113 @@ importer = Importer.new(client, 'https://github.com/[organization]/[repo].wiki.g
 importer.import(dry_run: true)
 
 ```
+
+# ファイルアップロード（非公式）
+
+**注意**: このAPIは公式ドキュメントに記載されていない非公式なAPIです。公式Rubyクライアント（[esaio/esa-ruby](https://github.com/esaio/esa-ruby)）の実装を調査して仕様を推定したものです。将来的に変更される可能性があります。
+
+esa.ioでは、記事に画像やファイルを添付することができます。アップロードは以下の2段階のプロセスで行われます。
+
+1. **アップロードポリシーの取得**: esa.io APIに対してファイル情報を送信し、S3への直接アップロードに必要な認証情報を取得
+2. **S3への直接アップロード**: 取得したポリシー情報を使用してファイルをS3に直接アップロード
+
+## POST /v1/teams/:team_name/attachments/policies
+
+ファイルをS3にアップロードするためのポリシー情報を取得します。
+
+### パラメータ
+
+- `type` (String, **required**)
+    - アップロードするファイルのContent-Type (例: `image/png`, `image/jpeg`)
+- `name` (String, **required**)
+    - ファイル名 (例: `example.png`)
+- `size` (Integer, **required**)
+    - ファイルサイズ（バイト単位）
+
+### リクエスト例
+
+```bash
+curl -X POST "https://api.esa.io/v1/teams/your-team/attachments/policies" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "type=image/png" \
+  -d "name=example.png" \
+  -d "size=12345"
+```
+
+### レスポンス例
+
+```json
+{
+  "attachment": {
+    "endpoint": "https://s3-ap-northeast-1.amazonaws.com/your-bucket",
+    "url": "https://your-esa-image-host/uploads/..."
+  },
+  "form": {
+    "AWSAccessKeyId": "...",
+    "signature": "...",
+    "policy": "...",
+    "key": "uploads/...",
+    "Content-Type": "image/png",
+    "Cache-Control": "max-age=31557600, public",
+    "Content-Disposition": "filename*=UTF-8''example.png",
+    "acl": "public-read"
+  }
+}
+```
+
+- `attachment.endpoint`: ファイルをアップロードするS3エンドポイントURL
+- `attachment.url`: アップロード成功後にファイルがアクセス可能になるURL（記事に埋め込む際に使用）
+- `form`: S3へのPOSTリクエストで使用するフォームデータ
+
+### S3へのファイルアップロード
+
+ポリシー取得後、返されたエンドポイントに対してmultipart/form-dataでファイルをアップロードします。
+
+```bash
+curl -X POST "${ENDPOINT}" \
+  -F "AWSAccessKeyId=${AWS_ACCESS_KEY_ID}" \
+  -F "signature=${SIGNATURE}" \
+  -F "policy=${POLICY}" \
+  -F "key=${KEY}" \
+  -F "Content-Type=${CONTENT_TYPE}" \
+  -F "Cache-Control=${CACHE_CONTROL}" \
+  -F "Content-Disposition=${CONTENT_DISPOSITION}" \
+  -F "acl=${ACL}" \
+  -F "file=@path/to/your/file.png"
+```
+
+アップロードが成功すると、HTTPステータスコード `204 No Content` が返されます。
+
+### 記事での使用
+
+アップロード完了後、`attachment.url` を使用してMarkdown記事内でファイルを参照できます。
+
+```markdown
+![ファイル名](https://your-esa-image-host/uploads/...)
+```
+
+### 公式Rubyクライアントでの利用
+
+公式Rubyクライアントでは `upload_attachment` メソッドでこの機能を利用できます：
+
+```ruby
+client = Esa::Client.new(
+  access_token: 'your_access_token',
+  current_team: 'your_team_name'
+)
+
+# ファイルパス、ファイルオブジェクト、URLを指定可能
+response = client.upload_attachment('/path/to/image.png')
+
+if response.status == 200
+  # アップロード成功
+  attachment_url = response.body['attachment']['url']
+  puts "アップロード完了: #{attachment_url}"
+end
+```
+
+参考: [esaio/esa-ruby `api_methods.rb`](https://github.com/esaio/esa-ruby/blob/3431e02e967845cf4c12bbd5860312d7dda2771f/lib/esa/api_methods.rb#L170)
 
 # 今後の実装予定
 - Preview API

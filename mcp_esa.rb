@@ -28,11 +28,12 @@
 
 require 'bundler/inline'
 
-gemfile(true, quiet: true) do  
+gemfile(true, quiet: true) do
   source "https://rubygems.org"
   gem "mcp"
   gem "net-http"
   gem "json"
+  gem "base64"
 end
 
 require 'mcp'
@@ -40,6 +41,7 @@ require 'mcp/server/transports/stdio_transport'
 require 'net/http'
 require 'uri'
 require 'json'
+require 'base64'
 
 # The EsaClient class manages HTTP requests to the Esa API
 class EsaClient
@@ -72,6 +74,56 @@ class EsaClient
     request = Net::HTTP::Patch.new(uri)
     set_headers(request)
     request.body = body.to_json
+    execute_request(uri, request)
+  end
+
+  # Sends an HTTP POST request with form-data to the specified URL (for S3 upload)
+  def post_form_data(url, form_data)
+    uri = URI(url)
+    request = Net::HTTP::Post.new(uri)
+
+    # Build multipart form data
+    boundary = "----formdata-mcp-esa-#{Time.now.to_i}"
+    request['Content-Type'] = "multipart/form-data; boundary=#{boundary}"
+
+    body_parts = []
+    form_data.each do |key, value|
+      if key == :file
+        # File upload part
+        file_content = value[:content]
+        filename = value[:filename]
+        content_type = value[:content_type]
+
+        body_parts << "--#{boundary}\r\n"
+        body_parts << "Content-Disposition: form-data; name=\"file\"; filename=\"#{filename}\"\r\n"
+        body_parts << "Content-Type: #{content_type}\r\n\r\n"
+        body_parts << file_content
+        body_parts << "\r\n"
+      else
+        # Regular form field
+        body_parts << "--#{boundary}\r\n"
+        body_parts << "Content-Disposition: form-data; name=\"#{key}\"\r\n\r\n"
+        body_parts << value.to_s
+        body_parts << "\r\n"
+      end
+    end
+    body_parts << "--#{boundary}--\r\n"
+
+    request.body = body_parts.join
+
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    response = http.request(request)
+    handle_s3_response(response)
+  end
+
+  # Sends a POST request with form-encoded data (for attachment policies)
+  def post_form_encoded(path, params = {})
+    uri = build_uri(path)
+    request = Net::HTTP::Post.new(uri)
+    request['Authorization'] = "Bearer #{@access_token}"
+    request['Content-Type'] = 'application/x-www-form-urlencoded'
+    request.body = URI.encode_www_form(params)
     execute_request(uri, request)
   end
 
@@ -119,6 +171,16 @@ class EsaClient
         error_message = "HTTP error #{response.code}"
       end
       raise "Error: #{error_message}"
+    end
+  end
+
+  # Handles S3 upload response (expects 204 No Content for success)
+  def handle_s3_response(response)
+    case response.code.to_i
+    when 204
+      { success: true }
+    else
+      raise "S3 upload failed with status #{response.code}: #{response.body}"
     end
   end
 
@@ -362,6 +424,110 @@ class UpdatePostTool < MCP::Tool
   end
 end
 
+class UploadAttachmentTool < MCP::Tool
+  description "Upload a file attachment to esa.io (beta feature)"
+  input_schema(
+    type: "object",
+    properties: {
+      file_path: {
+        type: "string",
+        description: "Path to the file to upload"
+      },
+      team_name: {
+        type: "string",
+        description: "Team name (uses ESA_TEAM_NAME env var if omitted)"
+      }
+    },
+    required: ["file_path"]
+  )
+
+  class << self
+    def call(file_path:, team_name: nil)
+      begin
+        team_name ||= ENV['ESA_TEAM_NAME']
+        esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
+
+        # Validate file existence
+        unless File.exist?(file_path)
+          raise "File not found: #{file_path}"
+        end
+
+        # Read file and get metadata
+        file_content = File.read(file_path)
+        filename = File.basename(file_path)
+        file_size = file_content.bytesize
+
+        # Determine content type based on file extension
+        content_type = case File.extname(filename).downcase
+        when '.png' then 'image/png'
+        when '.jpg', '.jpeg' then 'image/jpeg'
+        when '.gif' then 'image/gif'
+        when '.webp' then 'image/webp'
+        when '.svg' then 'image/svg+xml'
+        when '.bmp' then 'image/bmp'
+        when '.pdf' then 'application/pdf'
+        when '.txt' then 'text/plain'
+        when '.md' then 'text/markdown'
+        else 'application/octet-stream'
+        end
+
+        # Step 1: Get upload policy from esa.io
+        policy_params = {
+          type: content_type,
+          name: filename,
+          size: file_size
+        }
+
+        policy_result = esa_client.post_form_encoded("/teams/#{team_name}/attachments/policies", policy_params)
+
+        # Step 2: Upload file to S3 using the policy
+        attachment = policy_result['attachment']
+        form_data = policy_result['form']
+
+        # Prepare form data for S3 upload
+        upload_data = {}
+        form_data.each { |key, value| upload_data[key.to_sym] = value }
+        upload_data[:file] = {
+          content: file_content,
+          filename: filename,
+          content_type: content_type
+        }
+
+        # Upload to S3
+        s3_result = esa_client.post_form_data(attachment['endpoint'], upload_data)
+
+        if s3_result[:success]
+          response_text = <<~TEXT
+            File uploaded successfully!
+
+            Filename: #{filename}
+            Size: #{file_size} bytes
+            Content-Type: #{content_type}
+            URL: #{attachment['url']}
+
+            You can now use this URL in your esa posts:
+            ![#{filename}](#{attachment['url']})
+          TEXT
+
+          MCP::Tool::Response.new([
+            { type: "text", text: response_text }
+          ])
+        else
+          raise "S3 upload failed"
+        end
+
+      rescue => e
+        MCP::Tool::Response.new([
+          {
+            type: "text",
+            text: "Error uploading file: #{e.message}\n#{e.backtrace.join("\n")}"
+          }
+        ])
+      end
+    end
+  end
+end
+
 # Set up the server
 server = MCP::Server.new(
   name: "esa-mcp-server",
@@ -370,7 +536,8 @@ server = MCP::Server.new(
     GetPostsTool,
     GetPostTool,
     CreatePostTool,
-    UpdatePostTool
+    UpdatePostTool,
+    UploadAttachmentTool
   ]
 )
 
