@@ -528,6 +528,14 @@ class UploadAttachmentTool < MCP::Tool
   end
 end
 
+# Define resources
+recent_posts_resource = MCP::Resource.new(
+  uri: "esa://teams/#{team_name}/posts/recent",
+  name: "recent_posts",
+  description: "Recently updated posts from the esa team",
+  mime_type: "application/json"
+)
+
 # Set up the server
 server = MCP::Server.new(
   name: "esa-mcp-server",
@@ -538,7 +546,8 @@ server = MCP::Server.new(
     CreatePostTool,
     UpdatePostTool,
     UploadAttachmentTool
-  ]
+  ],
+  resources: [recent_posts_resource]
 )
 
 # Add additional tools using define_tool method
@@ -719,6 +728,224 @@ server.define_tool(
   MCP::Tool::Response.new([
     { type: "text", text: "Comment created successfully: ID #{result['id']}" }
   ])
+end
+
+# Category management tools
+server.define_tool(
+  name: "get_categories",
+  description: "Get a list of categories under the specified path",
+  input_schema: {
+    type: "object",
+    properties: {
+      select: {
+        type: "string",
+        description: "Category path to retrieve (e.g., 'dev' or 'dev/api'). Required to specify which categories to get."
+      },
+      include: {
+        type: "string",
+        enum: ["posts", "parent_categories"],
+        description: "Additional information to include (optional)"
+      },
+      page: {
+        type: "integer",
+        description: "Page number (default: 1)"
+      },
+      per_page: {
+        type: "integer",
+        description: "Items per page (default: 20, max: 100)"
+      },
+      team_name: {
+        type: "string",
+        description: "Team name (uses ESA_TEAM_NAME env var if omitted)"
+      }
+    },
+    required: ["select"]
+  }
+) do |select:, include: nil, page: nil, per_page: nil, team_name: nil|
+  team_name ||= ENV['ESA_TEAM_NAME']
+  params = { select: select }
+  params[:include] = include if include
+  params[:page] = page if page
+  params[:per_page] = per_page if per_page
+
+  esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
+  result = esa_client.get("/teams/#{team_name}/categories", params)
+
+  categories_text = result['categories'].map do |category|
+    "- #{category['full_name']} (#{category['count']} posts)"
+  end.join("\n")
+
+  MCP::Tool::Response.new([
+    { type: "text", text: "Categories under '#{select}':\n\n#{categories_text}" }
+  ])
+end
+
+server.define_tool(
+  name: "get_top_categories",
+  description: "Get a list of top-level categories (categories at the root level)",
+  input_schema: {
+    type: "object",
+    properties: {
+      team_name: {
+        type: "string",
+        description: "Team name (uses ESA_TEAM_NAME env var if omitted)"
+      }
+    }
+  }
+) do |team_name: nil|
+  team_name ||= ENV['ESA_TEAM_NAME']
+
+  esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
+  result = esa_client.get("/teams/#{team_name}/categories/top")
+
+  categories_text = result['categories'].map do |category|
+    "- #{category['full_name']} (#{category['count']} posts)"
+  end.join("\n")
+
+  MCP::Tool::Response.new([
+    { type: "text", text: "Top-level categories:\n\n#{categories_text}" }
+  ])
+end
+
+server.define_tool(
+  name: "get_all_category_paths",
+  description: "Get all category paths in the team with post counts. Useful for understanding category structure and planning organization.",
+  input_schema: {
+    type: "object",
+    properties: {
+      prefix: {
+        type: "string",
+        description: "Filter paths starting with this prefix (e.g., 'dev' finds 'dev', 'dev/api', 'dev/docs')"
+      },
+      match: {
+        type: "string",
+        description: "Filter paths containing this string (e.g., 'api' finds 'dev/api', 'backend/api')"
+      },
+      team_name: {
+        type: "string",
+        description: "Team name (uses ESA_TEAM_NAME env var if omitted)"
+      }
+    }
+  }
+) do |prefix: nil, match: nil, team_name: nil|
+  team_name ||= ENV['ESA_TEAM_NAME']
+
+  esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
+  result = esa_client.get("/teams/#{team_name}/categories/paths")
+
+  # Extract categories and filter out null paths
+  categories = result['categories'] || []
+  paths_with_counts = categories.map { |cat| { path: cat['path'], posts: cat['posts'] } }.reject { |cat| cat[:path].nil? }
+
+  # Apply filters if specified
+  filtered_paths = paths_with_counts
+  filtered_paths = filtered_paths.select { |cat| cat[:path].start_with?(prefix) } if prefix
+  filtered_paths = filtered_paths.select { |cat| cat[:path].include?(match) } if match
+
+  if filtered_paths.empty?
+    filter_info = [prefix ? "prefix: #{prefix}" : nil, match ? "match: #{match}" : nil].compact.join(", ")
+    message = filter_info.empty? ? "No categories found." : "No categories found matching filters (#{filter_info})."
+
+    MCP::Tool::Response.new([
+      { type: "text", text: message }
+    ])
+  else
+    paths_text = filtered_paths.map { |cat| "- #{cat[:path]} (#{cat[:posts]} posts)" }.join("\n")
+    filter_info = [prefix ? "prefix: #{prefix}" : nil, match ? "match: #{match}" : nil].compact.join(", ")
+    header = filter_info.empty? ? "All category paths:" : "Category paths (filtered by #{filter_info}):"
+
+    MCP::Tool::Response.new([
+      { type: "text", text: "#{header}\n\n#{paths_text}\n\nTotal: #{filtered_paths.length} categories" }
+    ])
+  end
+end
+
+# Resource handler for reading recent posts
+server.resources_read_handler do |params|
+  uri = params[:uri]
+
+  # Extract team name from URI: esa://teams/{team_name}/posts/recent
+  if uri =~ %r{^esa://teams/([^/]+)/posts/recent$}
+    team_name = $1
+    esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
+
+    # Get recent posts (sorted by updated, descending)
+    result = esa_client.get("/teams/#{team_name}/posts", { sort: "updated", order: "desc", per_page: 20 })
+
+    posts_data = result['posts'].map do |post|
+      {
+        number: post['number'],
+        name: post['name'],
+        full_name: post['full_name'],
+        wip: post['wip'],
+        body_md: post['body_md'],
+        url: post['url'],
+        updated_at: post['updated_at'],
+        category: post['category'],
+        tags: post['tags']
+      }
+    end
+
+    [{
+      uri: uri,
+      mimeType: "application/json",
+      text: JSON.pretty_generate(posts_data)
+    }]
+  else
+    raise "Unknown resource URI: #{uri}"
+  end
+end
+
+# Define prompt for summarizing posts
+server.define_prompt(
+  name: "summarize_post",
+  description: "Summarize a post from esa",
+  arguments: [
+    MCP::Prompt::Argument.new(
+      name: "team_name",
+      description: "Team name",
+      required: true
+    ),
+    MCP::Prompt::Argument.new(
+      name: "post_number",
+      description: "Post number to summarize",
+      required: true
+    )
+  ]
+) do |args|
+  team_name = args[:team_name]
+  post_number = args[:post_number]
+
+  esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
+  result = esa_client.get("/teams/#{team_name}/posts/#{post_number}")
+
+  # Create a prompt message that asks to summarize the post
+  prompt_text = <<~PROMPT
+    Please summarize the following esa post:
+
+    Title: #{result['full_name']}
+    Category: #{result['category'] || 'None'}
+    Tags: #{result['tags']&.join(', ') || 'None'}
+    Status: #{result['wip'] ? 'WIP (Work In Progress)' : 'Published'}
+    Updated: #{result['updated_at']}
+
+    Content:
+    #{result['body_md']}
+
+    Please provide a concise summary that includes:
+    1. Main topic and purpose
+    2. Key points and findings
+    3. Important notes or conclusions
+  PROMPT
+
+  MCP::Prompt::Result.new(
+    messages: [
+      MCP::Prompt::Message.new(
+        role: "user",
+        content: MCP::Content::Text.new(prompt_text)
+      )
+    ]
+  )
 end
 
 # Create and start the transport
