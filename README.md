@@ -30,7 +30,37 @@ export ESA_TEAM_NAME="your_team_name"
 ```
 
 ### MCP Configuration
-Add to your `.mcp.json`:
+
+#### Using Claude Code CLI (Recommended)
+
+```bash
+# Add as local configuration (default)
+claude mcp add --transport stdio \
+  --env ESA_ACCESS_TOKEN=$ESA_ACCESS_TOKEN \
+  --env ESA_TEAM_NAME=your_team_name \
+  esa -- ruby /absolute/path/to/mcp_esa.rb
+
+# Add for project sharing (saves to .mcp.json)
+claude mcp add --transport stdio --scope project \
+  --env ESA_ACCESS_TOKEN=$ESA_ACCESS_TOKEN \
+  --env ESA_TEAM_NAME=your_team_name \
+  esa -- ruby /absolute/path/to/mcp_esa.rb
+```
+
+**Options:**
+- `--transport stdio`: Run as a local process
+- `--scope`: Where to save the config (`local`=personal, `project`=team shared, `user`=cross-project)
+- `--env KEY=value`: Set environment variables (can specify multiple)
+
+**Management commands:**
+```bash
+claude mcp list          # List all servers
+claude mcp get esa       # Show server details
+claude mcp remove esa    # Remove a server
+```
+
+#### Manual `.mcp.json` Configuration
+
 ```json
 {
   "mcpServers": {
