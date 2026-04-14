@@ -670,15 +670,27 @@ server.define_tool(
       team_name: {
         type: "string",
         description: "Team name (uses ESA_TEAM_NAME env var if omitted)"
+      },
+      page: {
+        type: "integer",
+        description: "Page number (default: 1)"
+      },
+      per_page: {
+        type: "integer",
+        description: "Items per page (default: 20, max: 100)"
       }
     },
     required: ["post_number"]
   }
-) do |post_number:, team_name: nil|
+) do |post_number:, team_name: nil, page: nil, per_page: nil|
   team_name ||= ENV['ESA_TEAM_NAME']
 
+  params = {}
+  params[:page] = page if page
+  params[:per_page] = per_page if per_page
+
   esa_client = EsaClient.new(ENV['ESA_ACCESS_TOKEN'], team_name)
-  result = esa_client.get("/teams/#{team_name}/posts/#{post_number}/comments")
+  result = esa_client.get("/teams/#{team_name}/posts/#{post_number}/comments", params)
 
   if result['comments'].empty?
     comments_text = "No comments."
@@ -692,8 +704,10 @@ server.define_tool(
     end.join("\n#{'-' * 50}\n")
   end
 
+  page_info = "\n\nPage info: #{result['page']}/#{(result['total_count'].to_f / result['per_page']).ceil} (total: #{result['total_count']})"
+
   MCP::Tool::Response.new([
-    { type: "text", text: "Comments list:\n\n#{comments_text}" }
+    { type: "text", text: "Comments list:\n\n#{comments_text}#{page_info}" }
   ])
 end
 
