@@ -24,13 +24,16 @@ This is an MCP (Model Context Protocol) server for integrating with the esa.io A
 
 Uses bundler/inline to embed all dependencies within the single file:
 - `mcp`: Official MCP Ruby SDK for server implementation
-- `net-http`: Standard Ruby HTTP client  
+- `net-http`: Standard Ruby HTTP client
 - `json`: JSON parsing and generation
+- `base64`: Base64 encoding for file uploads
 
 ### API Client Design
 
 The EsaClient class provides a clean abstraction over the esa.io REST API:
 - GET, POST, PATCH methods with automatic Bearer token authentication
+- POST with multipart form-data for S3 file uploads (`post_form_data`)
+- POST with form-encoded data for attachment policies (`post_form_encoded`)
 - Error handling for common HTTP status codes (401, 404, 429, etc.)
 - URL path construction that properly handles the `/v1` API version prefix
 
@@ -50,6 +53,22 @@ The EsaClient class provides a clean abstraction over the esa.io REST API:
 ### Comment Operations
 - `get_comments`: List comments for a specific post
 - `create_comment`: Add new comments to posts
+
+### Category Operations
+- `get_categories`: Get categories under a specified path
+- `get_top_categories`: Get top-level (root) categories
+- `get_all_category_paths`: Get all category paths with post counts (supports filtering by prefix/match)
+
+### Attachment Operations
+- `upload_attachment_tool`: Upload files to esa.io (beta feature, supports images and documents)
+
+## Available Resources
+
+- `esa://teams/{team_name}/posts/recent`: Returns the 20 most recently updated posts as JSON
+
+## Available Prompts
+
+- `summarize_post`: Generate a summary of a specified post (requires team_name and post_number arguments)
 
 ## Configuration
 
